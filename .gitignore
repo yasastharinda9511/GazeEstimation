@@ -77,6 +77,10 @@ logs/
 *.zip
 *.tar.gz
 archive/*
+openEDS/*
+bbox/*
+openEDS_events/*
+gaze_vector_prediction/*
 
 # Temporary files
 *.tmp
