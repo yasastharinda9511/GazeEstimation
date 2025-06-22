@@ -27,6 +27,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+venv*
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints
