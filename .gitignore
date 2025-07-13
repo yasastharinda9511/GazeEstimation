@@ -92,3 +92,5 @@ gaze_vector_prediction/*
 *.orig
 .DS_Store
 Thumbs.db
+
+*.mp4
