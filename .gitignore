@@ -94,3 +94,6 @@ gaze_vector_prediction/*
 Thumbs.db
 
 *.mp4
+*.png
+
+output_images/*
