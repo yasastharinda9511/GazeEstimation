@@ -266,20 +266,6 @@ class PrivacyPreservingUNet:
             'iou_metric_multiclass': iou_metric_multiclass
         }
         return tf.keras.models.load_model(model_path, custom_objects=custom_objects)
-       
-
-# Custom optimizer with gradient noise and clipping
-class PrivacyAwareOptimizer:
-    def __init__(self, base_optimizer, gradient_noise_stddev=0.1, gradient_clip_value=1.0):
-        self.base_optimizer = base_optimizer
-        self.gradient_noise_stddev = gradient_noise_stddev
-        self.gradient_clip_value = gradient_clip_value
-    
-    def get_optimizer(self):
-        """Get optimizer with privacy-preserving modifications"""
-        # Note: This is a conceptual implementation
-        # In practice, you would need to implement custom training loop
-        return self.base_optimizer
 
 # Custom training function with privacy techniques
 def train_with_privacy_techniques(model, train_data, val_data, privacy_config, 
