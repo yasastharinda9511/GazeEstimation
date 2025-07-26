@@ -13,6 +13,58 @@ from tensorflow.keras.models import Model
 import numpy as np
 import cv2
 
+class FeatureEncryptionLayer(Layer):
+    def __init__(self, encryption_strength=0.5, use_random_projection=True, **kwargs):
+        super().__init__(**kwargs)
+        self.encryption_strength = encryption_strength
+        self.use_random_projection = use_random_projection
+
+    def build(self, input_shape):
+        # Create learnable encryption matrix
+        self.encryption_matrix = self.add_weight(
+            name='encryption_matrix',
+            shape=(input_shape[-1], input_shape[-1]),
+            initializer='orthogonal',
+            trainable=True
+        )
+        
+        # Create bias for additional obfuscation
+        self.encryption_bias = self.add_weight(
+            name='encryption_bias',
+            shape=(input_shape[-1],),
+            initializer='zeros',
+            trainable=True
+        )
+        
+        if self.use_random_projection:
+            # Fixed random projection matrix (not trainable)
+            self.random_projection = self.add_weight(
+                name='random_projection',
+                shape=(input_shape[-1], input_shape[-1]),
+                initializer='random_normal',
+                trainable=False
+            )
+    def call(self, inputs, training=None):
+        # Apply learnable transformation
+        encrypted = tf.matmul(inputs, self.encryption_matrix) + self.encryption_bias
+        
+        # Apply random projection if enabled
+        if self.use_random_projection:
+            encrypted = tf.matmul(encrypted, self.random_projection)
+        
+        # Mix original and encrypted features based on strength
+        mixed = (1 - self.encryption_strength) * inputs + self.encryption_strength * encrypted
+        
+        return mixed
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'encryption_strength': self.encryption_strength,
+            'use_random_projection': self.use_random_projection
+        })
+        return config
+
 class GaussianNoiseLayer(tf.keras.layers.Layer):
     def __init__(self, stddev, training_only=True, **kwargs):
         super().__init__(**kwargs)
@@ -128,12 +180,27 @@ class PrivacyPreservingUNet:
         
         if privacy_config:
             self.privacy_config.update(privacy_config)
+
+        print("Privacy configuration:")
+        for key, value in self.privacy_config.items():
+            print(f"  {key}: {value}")
     
     def add_gaussian_noise_layer(self, x, noise_stddev=0.01, training_only=True, name="noise"):
         """Add Gaussian noise layer for privacy protection"""
         return GaussianNoiseLayer(stddev=noise_stddev, training_only=training_only, name=name)(x)
     
-    def privacy_aware_conv_block(self, x, filters, block_name, dropout_rate=0.1, add_feature_noise=False):
+    def add_encryption_layer(self, x, layer_name):
+        """Add appropriate encryption layer based on configuration"""
+        if not self.privacy_config.get('feature_encryption', False):
+            return x
+        
+        return FeatureEncryptionLayer(
+            encryption_strength=self.privacy_config.get('encryption_strength', 0.5),
+            use_random_projection=True,
+            name=f"{layer_name}_encryption"
+        )(x)
+    
+    def privacy_aware_conv_block(self, x, noise_stddev, filters, block_name, dropout_rate=0.1, add_feature_noise=False):
         """Convolutional block with privacy-enhancing modifications"""
         # First convolution
         conv = Conv2D(filters, (3, 3), activation='relu', padding='same', 
@@ -142,9 +209,9 @@ class PrivacyPreservingUNet:
                      name=f"{block_name}_conv1")(x)
         
         # Add feature noise for privacy
-        if add_feature_noise and self.privacy_config.get('feature_noise', False):
+        if add_feature_noise:
             conv = self.add_gaussian_noise_layer(
-                conv, noise_stddev=0.005, name=f"{block_name}_feature_noise1"
+                conv, noise_stddev=noise_stddev, name=f"{block_name}_feature_noise1"
             )
         
         conv = BatchNormalization(name=f"{block_name}_bn1")(conv)
@@ -154,6 +221,8 @@ class PrivacyPreservingUNet:
                      kernel_initializer='he_normal',
                      kernel_regularizer=tf.keras.regularizers.l2(0.001),
                      name=f"{block_name}_conv2")(conv)
+        
+        conv = self.add_encryption_layer(conv, f"{block_name}_conv2")
         
         if add_feature_noise and self.privacy_config.get('feature_noise', False):
             conv = self.add_gaussian_noise_layer(
@@ -184,73 +253,69 @@ class PrivacyPreservingUNet:
         x = tf.keras.layers.Resizing(self.target_size[0], self.target_size[1], name="resize")(inputs)
         x = tf.keras.layers.Rescaling(1./255, name="rescale")(x)
         
-        # Optional Gaussian Blur (comment out if not needed)
+        # Optional input noise for privacy
+        noise_stddev = self.privacy_config.get('input_noise', 0.01)
+        drop_out_rate = max(self.privacy_config.get('privacy_dropout', 0.2), 0.1)
+        add_feature_noise = self.privacy_config.get('feature_noise', False)
+        
+        print(f"Adding input noise with stddev: {noise_stddev}, dropout rate: {drop_out_rate}, feature noise: {add_feature_noise}")
+
         x = GaussianBlur(name="gaussian_blur")(x)
 
-        # Encoder Path
+        if self.privacy_config.get('input_noise', 0) > 0:
+            x = self.add_gaussian_noise_layer(x, noise_stddev=noise_stddev , name="input_noise")
+        
         # Block 1
-        c1 = Conv2D(32, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(x)
-        c1 = BatchNormalization()(c1)
-        c1 = Conv2D(32, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c1)
-        c1 = BatchNormalization()(c1)
-        p1 = MaxPooling2D((2, 2))(c1)
-        p1 = Dropout(0.1)(p1)
+
+        c1 = self.privacy_aware_conv_block(x, noise_stddev= noise_stddev,  filters=32, block_name="encoder_block1", 
+                                          dropout_rate= drop_out_rate, add_feature_noise=add_feature_noise)
+        p1 = MaxPooling2D((2, 2), name="pool1")(c1)
 
         # Block 2
-        c2 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(p1)
-        c2 = BatchNormalization()(c2)
-        c2 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c2)
-        c2 = BatchNormalization()(c2)
-        p2 = MaxPooling2D((2, 2))(c2)
-        p2 = Dropout(0.2)(p2)
+        c2 = self.privacy_aware_conv_block(p1, noise_stddev= noise_stddev, filters=64, block_name="encoder_block2", 
+                                          dropout_rate=drop_out_rate, add_feature_noise=add_feature_noise)
+        p2 = MaxPooling2D((2, 2), name="pool2")(c2)
 
         # Block 3
-        c3 = Conv2D(128, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(p2)
-        c3 = BatchNormalization()(c3)
-        c3 = Conv2D(128, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c3)
-        c3 = BatchNormalization()(c3)
-        p3 = MaxPooling2D((2, 2))(c3)
-        p3 = Dropout(0.3)(p3)
+        c3 = self.privacy_aware_conv_block(p2, noise_stddev= noise_stddev, filters=128, block_name="encoder_block3", 
+                                          dropout_rate=drop_out_rate, add_feature_noise=add_feature_noise)
+        p3 = MaxPooling2D((2, 2), name="pool3")(c3)
 
         # Bottleneck
-        c4 = Conv2D(256, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(p3)
-        c4 = BatchNormalization()(c4)
-        c4 = Conv2D(256, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c4)
-        c4 = BatchNormalization()(c4)
-        c4 = Dropout(0.4)(c4)
+        c4 = self.privacy_aware_conv_block(p3, noise_stddev= noise_stddev, filters=256, block_name="bottleneck", 
+                                          dropout_rate=drop_out_rate, add_feature_noise=add_feature_noise)
+        
+        # Add weight noise to bottleneck if configured
+        weight_noise = self.privacy_config.get('weight_noise', 0.001)
 
-        # Decoder Path
+        if self.privacy_config.get('weight_noise', 0) > 0:
+            c4 = self.add_weight_noise_layer(c4, noise_stddev=weight_noise, 
+                                           name="bottleneck_weight_noise")
+
+        # Decoder Path using privacy-aware blocks
+        
         # Block 5
-        u5 = Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(c4)
-        u5 = concatenate([u5, c3])
-        c5 = Conv2D(128, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(u5)
-        c5 = BatchNormalization()(c5)
-        c5 = Conv2D(128, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c5)
-        c5 = BatchNormalization()(c5)
-        c5 = Dropout(0.3)(c5)
+        u5 = Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same', name="upsample5")(c4)
+        u5 = concatenate([u5, c3], name="concat5")
+        c5 = self.privacy_aware_conv_block(u5, noise_stddev= noise_stddev, filters=128, block_name="decoder_block5", 
+                                          dropout_rate=drop_out_rate, add_feature_noise=add_feature_noise)
 
         # Block 6
-        u6 = Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')(c5)
-        u6 = concatenate([u6, c2])
-        c6 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(u6)
-        c6 = BatchNormalization()(c6)
-        c6 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c6)
-        c6 = BatchNormalization()(c6)
-        c6 = Dropout(0.2)(c6)
+        u6 = Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same', name="upsample6")(c5)
+        u6 = concatenate([u6, c2], name="concat6")
+        c6 = self.privacy_aware_conv_block(u6, noise_stddev= noise_stddev, filters=64, block_name="decoder_block6", 
+                                          dropout_rate=drop_out_rate, add_feature_noise=add_feature_noise)
 
         # Block 7
-        u7 = Conv2DTranspose(32, (2, 2), strides=(2, 2), padding='same')(c6)
-        u7 = concatenate([u7, c1])
-        c7 = Conv2D(32, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(u7)
-        c7 = BatchNormalization()(c7)
-        c7 = Conv2D(32, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal')(c7)
-        c7 = BatchNormalization()(c7)
-        c7 = Dropout(0.1)(c7)
+        u7 = Conv2DTranspose(32, (2, 2), strides=(2, 2), padding='same', name="upsample7")(c6)
+        u7 = concatenate([u7, c1], name="concat7")
+        c7 = self.privacy_aware_conv_block(u7, noise_stddev= noise_stddev, filters=32, block_name="decoder_block7", 
+                                          dropout_rate=drop_out_rate, add_feature_noise=add_feature_noise)
 
         # Output layer
-        outputs = Conv2D(self.num_classes, (1, 1), activation='softmax')(c7)
+        outputs = Conv2D(self.num_classes, (1, 1), activation='softmax', name="output_layer")(c7)
 
-        model = Model(inputs, outputs, name="improved_unet")
+        model = Model(inputs, outputs, name="privacy_preserving_unet")
         return model
     @staticmethod
     def load_model(model_path):
@@ -266,6 +331,20 @@ class PrivacyPreservingUNet:
             'iou_metric_multiclass': iou_metric_multiclass
         }
         return tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+       
+
+# Custom optimizer with gradient noise and clipping
+class PrivacyAwareOptimizer:
+    def __init__(self, base_optimizer, gradient_noise_stddev=0.1, gradient_clip_value=1.0):
+        self.base_optimizer = base_optimizer
+        self.gradient_noise_stddev = gradient_noise_stddev
+        self.gradient_clip_value = gradient_clip_value
+    
+    def get_optimizer(self):
+        """Get optimizer with privacy-preserving modifications"""
+        # Note: This is a conceptual implementation
+        # In practice, you would need to implement custom training loop
+        return self.base_optimizer
 
 # Custom training function with privacy techniques
 def train_with_privacy_techniques(model, train_data, val_data, privacy_config, 
@@ -282,17 +361,10 @@ def train_with_privacy_techniques(model, train_data, val_data, privacy_config,
         clipnorm=privacy_config.get('gradient_clipping', 1.0)  # Gradient clipping
     )
     
-    # Use label smoothing for privacy
-    if privacy_config.get('label_smoothing', 0) > 0:
-        loss = tf.keras.losses.CategoricalCrossentropy(
-            label_smoothing=privacy_config['label_smoothing']
-        )
-    else:
-        loss = 'sparse_categorical_crossentropy'
-    
+
     model.compile(
         optimizer=optimizer,
-        loss= "sparse_categorical_crossentropy",
+        loss= 'sparse_categorical_crossentropy',
         metrics=['accuracy', dice_coefficient_multiclass, iou_metric_multiclass]
     )
     
@@ -302,10 +374,6 @@ def train_with_privacy_techniques(model, train_data, val_data, privacy_config,
         tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5),
     ]
     
-    # Add gradient noise callback (custom implementation would be needed)
-    if privacy_config.get('gradient_noise', 0) > 0:
-        print(f"Training with gradient noise: {privacy_config['gradient_noise']}")
-        # Note: Full implementation would require custom training loop
     
     print("Privacy-preserving training configuration:")
     for key, value in privacy_config.items():
@@ -342,56 +410,6 @@ def dice_loss_multiclass(y_true, y_pred, smooth=1e-6):
     """Dice loss for multi-class segmentation"""
     return 1 - dice_coefficient_multiclass(y_true, y_pred, smooth)
 
-def focal_loss_multiclass(gamma=2., alpha=0.25):
-    """Focal loss for multi-class segmentation with sparse labels"""
-    def focal_loss_fixed(y_true, y_pred):
-        # Convert sparse labels to one-hot if needed
-        if len(y_true.shape) != len(y_pred.shape):
-            y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), depth=tf.shape(y_pred)[-1])
-            y_true_onehot = tf.cast(y_true_onehot, tf.float32)
-        else:
-            y_true_onehot = y_true
-            
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        
-        # Calculate cross entropy
-        ce = -y_true_onehot * tf.math.log(y_pred)
-        
-        # Calculate focal weight
-        p_t = tf.where(tf.equal(y_true_onehot, 1), y_pred, 1 - y_pred)
-        alpha_factor = y_true_onehot * alpha + (1 - y_true_onehot) * (1 - alpha)
-        modulating_factor = tf.pow((1 - p_t), gamma)
-        
-        # Apply focal weight
-        focal_ce = alpha_factor * modulating_factor * ce
-        
-        return tf.reduce_mean(tf.reduce_sum(focal_ce, axis=-1))
-    
-    return focal_loss_fixed
-
-def weighted_categorical_crossentropy(class_weights):
-    """Weighted categorical crossentropy for handling class imbalance"""
-    def loss(y_true, y_pred):
-        # Convert sparse labels to one-hot if needed
-        if len(y_true.shape) != len(y_pred.shape):
-            y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), depth=tf.shape(y_pred)[-1])
-            y_true_onehot = tf.cast(y_true_onehot, tf.float32)
-        else:
-            y_true_onehot = y_true
-            
-        # Apply class weights
-        weights = tf.reduce_sum(class_weights * y_true_onehot, axis=-1)
-        
-        # Calculate categorical crossentropy
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
-        loss = -tf.reduce_sum(y_true_onehot * tf.math.log(y_pred), axis=-1)
-        
-        return tf.reduce_mean(weights * loss)
-    
-    return loss
-
 # IoU Metric for multi-class
 def iou_metric_multiclass(y_true, y_pred, smooth=1e-6):
     # Convert predictions to class labels
@@ -419,55 +437,3 @@ def scheduler(epoch, lr):
         return lr * 0.1
 
 # Factory function for different privacy levels
-def create_lightweight_privacy_unet(privacy_level="medium"):
-    """
-    Create U-Net with different privacy levels using only native TensorFlow
-    """
-    privacy_configs = {
-        "low": {
-            'input_noise': 0.005,
-            'privacy_dropout': 0.15,
-            'gradient_clipping': 2.0,
-            'label_smoothing': 0.05,
-            'feature_noise': False
-        },
-        "medium": {
-            'gradient_noise': 0.1,
-            'gradient_clipping': 1.0,
-            'input_noise': 0.01,
-            'weight_noise': 0.001,
-            'privacy_dropout': 0.2,
-            'label_smoothing': 0.1,
-            'mixup_alpha': 0.2,
-            'feature_noise': True
-        },
-        "high": {
-            'gradient_noise': 0.2,
-            'gradient_clipping': 0.5,
-            'input_noise': 0.02,
-            'weight_noise': 0.005,
-            'privacy_dropout': 0.3,
-            'label_smoothing': 0.15,
-            'mixup_alpha': 0.3,
-            'feature_noise': True
-        }
-    }
-    
-    config = privacy_configs.get(privacy_level, privacy_configs["medium"])
-    
-    privacy_unet = PrivacyPreservingUNet(
-        input_size=(None, None, 1),
-        target_size=(128, 128),
-        num_classes=4,
-        privacy_config=config
-    )
-    
-    model = privacy_unet.build_model()
-    
-    print(f"\nPrivacy-preserving U-Net created with {privacy_level} privacy level")
-    print("Privacy techniques applied:")
-    for technique, value in config.items():
-        if value:
-            print(f"  ✓ {technique}: {value}")
-    
-    return model, config
