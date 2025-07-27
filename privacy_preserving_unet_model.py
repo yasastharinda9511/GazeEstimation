@@ -327,6 +327,7 @@ class PrivacyPreservingUNet:
             'GaussianNoiseLayer': GaussianNoiseLayer,
             'WeightNoiseLayer': WeightNoiseLayer,
             'MixupLayer': MixupLayer,
+            'FeatureEncryptionLayer': FeatureEncryptionLayer,
             'dice_coefficient_multiclass': dice_coefficient_multiclass,
             'iou_metric_multiclass': iou_metric_multiclass
         }
