@@ -506,3 +506,51 @@ class PrivacyVitsModel:
         print("=" * 80)
         
         return model, history, eval_results
+    
+    @staticmethod
+    def load_model(model_path):
+        """Load a saved model from disk"""
+
+        def dice_coefficient_enhanced(y_true, y_pred, smooth=1e-6, class_weights=None):
+            # Convert sparse labels to one-hot
+            if len(y_true.shape) != len(y_pred.shape):
+                y_true = tf.one_hot(tf.cast(y_true, tf.int32), depth=tf.shape(y_pred)[-1])
+                y_true = tf.cast(y_true, tf.float32)
+            
+            # Flatten tensors
+            y_true_f = tf.reshape(y_true, [-1, tf.shape(y_true)[-1]])
+            y_pred_f = tf.reshape(y_pred, [-1, tf.shape(y_pred)[-1]])
+            
+            # Calculate intersection and union for each class
+            intersection = tf.reduce_sum(y_true_f * y_pred_f, axis=0)
+            union = tf.reduce_sum(y_true_f, axis=0) + tf.reduce_sum(y_pred_f, axis=0)
+            dice_per_class = (2. * intersection + smooth) / (union + smooth)
+            
+            # Apply class weights if provided
+            if class_weights is not None:
+                class_weights = tf.constant(class_weights, dtype=tf.float32)
+                dice_per_class = dice_per_class * class_weights
+            
+            return tf.reduce_mean(dice_per_class)
+
+        if os.path.exists(model_path):
+            model = tf.keras.models.load_model(
+                model_path,
+                custom_objects={
+                    'dice_coefficient_enhanced': dice_coefficient_enhanced,
+                    'AdaptivePrivacyPatchDrop': AdaptivePrivacyPatchDrop,
+                    'PrivacyAwareFeatureExtractor': PrivacyAwareFeatureExtractor,
+                    'DifferentialPrivacyLayer': DifferentialPrivacyLayer,
+                    'PatchExtract': PatchExtract,
+                    'PatchEmbedding': PatchEmbedding,
+                    'TransformerBlock': TransformerBlock,
+                    'UpsampleBlock': UpsampleBlock,
+                    'GetItem': GetItem,
+                    'MultiHeadAttention': MultiHeadAttention
+                }
+            )
+            print(f"✅ Model loaded from {model_path}")
+            return model
+        else:
+            print(f"❌ Model path {model_path} does not exist.")
+            return None
