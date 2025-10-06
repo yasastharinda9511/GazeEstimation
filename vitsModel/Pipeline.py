@@ -14,7 +14,7 @@ class Pipeline:
     @staticmethod
     def complete_training_pipeline(model, callbacks, images, labels, epochs=15, batch_size=4, 
                              test_size=0.2, enhanced_augmentation=True, 
-                             verbose_evaluation=True):
+                             verbose_evaluation=True, name = "vit_eye_model"):
     
     
         X_train, X_val, y_train, y_val = train_test_split(
@@ -68,7 +68,7 @@ class Pipeline:
         # Update the checkpoint path to be unique for this batch
         for callback in callbacks:
             if isinstance(callback, tf.keras.callbacks.ModelCheckpoint):
-                callback.filepath = f'best_enhanced_vit_eye_model_batch_{step if "step" in globals() else "current"}.h5'
+                callback.filepath = f'{name}.h5'
         
         history = model.fit(
             train_dataset,
@@ -140,18 +140,6 @@ class Pipeline:
             print(f"✅ Quick evaluation - Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, Dice: {val_dice:.4f}")
             eval_results = {'val_loss': val_loss, 'val_accuracy': val_acc, 'val_dice': val_dice}
         
-        # ============================================================================
-        # 5. VISUALIZATION
-        # ============================================================================
-        
-        if verbose_evaluation and len(X_val) >= 4:
-            print("\n🎨 Creating visualizations...")
-            
-            try:
-                visualize_predictions_enhanced(model, X_val, y_val, pred_masks, num_samples=min(4, len(X_val)))
-                print("✅ Visualizations saved!")
-            except Exception as e:
-                print(f"⚠️  Visualization failed: {str(e)}")
         
         print("\n" + "=" * 80)
         print("🎉 TRAINING PIPELINE COMPLETED SUCCESSFULLY!")
