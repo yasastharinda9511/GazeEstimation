@@ -65,7 +65,7 @@ class ModelInversionAttack:
         
         # Convert target mask to one-hot
         target_mask_onehot = tf.one_hot(target_mask, depth=self.num_classes)
-        target_mask_onehot = tf.expand_dims(target_mask_onehot, 1)
+        target_mask_onehot = tf.expand_dims(target_mask_onehot, 0)
         
         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         
@@ -256,6 +256,185 @@ class ModelInversionAttack:
             'overall_accuracy': overall_accuracy
         }
     
+    def membership_inference_loss_based(self, model, train_images, train_labels,
+                                       test_images, test_labels):
+        """
+        Loss-based Membership Inference Attack.
+        
+        Uses loss values instead of confidence - training samples typically
+        have lower loss than test samples.
+        
+        Args:
+            model: Trained model
+            train_images: Training set images
+            train_labels: Training set labels
+            test_images: Test set images
+            test_labels: Test set labels
+            
+        Returns:
+            Dictionary with attack results
+        """
+        print(f"\n🔓 Starting Loss-Based Membership Inference Attack...")
+        
+        # Calculate per-sample losses
+        def get_sample_losses(images, labels):
+            losses = []
+            for img, label in zip(images, labels):
+                img_batch = np.expand_dims(img, 0)
+                label_batch = np.expand_dims(label, 0)
+                pred = model.predict(img_batch, verbose=0)
+                
+                # Calculate cross-entropy loss
+                label_onehot = tf.one_hot(label_batch, depth=self.num_classes)
+                loss = tf.reduce_mean(
+                    tf.keras.losses.categorical_crossentropy(label_onehot, pred)
+                ).numpy()
+                losses.append(loss)
+            return np.array(losses)
+        
+        print("   Computing losses for training samples...")
+        train_losses = get_sample_losses(train_images, train_labels)
+        
+        print("   Computing losses for test samples...")
+        test_losses = get_sample_losses(test_images, test_labels)
+        
+        # Lower loss -> likely a member
+        threshold = (np.mean(train_losses) + np.mean(test_losses)) / 2
+        
+        train_classified = (train_losses < threshold).astype(int)
+        test_classified = (test_losses >= threshold).astype(int)
+        
+        train_accuracy = np.mean(train_classified == 1)
+        test_accuracy = np.mean(test_classified == 1)
+        overall_accuracy = (train_accuracy + test_accuracy) / 2
+        
+        print(f"   Threshold: {threshold:.4f}")
+        print(f"   Train loss: {np.mean(train_losses):.4f} ± {np.std(train_losses):.4f}")
+        print(f"   Test loss:  {np.mean(test_losses):.4f} ± {np.std(test_losses):.4f}")
+        print(f"   Attack Accuracy: {overall_accuracy*100:.2f}%")
+        
+        return {
+            'train_losses': train_losses,
+            'test_losses': test_losses,
+            'threshold': threshold,
+            'train_accuracy': train_accuracy,
+            'test_accuracy': test_accuracy,
+            'overall_accuracy': overall_accuracy
+        }
+    
+    def attribute_inference_attack(self, model, target_images, sensitive_attribute_idx=2):
+        """
+        Attribute Inference Attack: Infer sensitive attributes from model outputs.
+        
+        For eye images, this could infer: iris color, pupil dilation, etc.
+        We use the iris class (class 2) as the "sensitive attribute".
+        
+        Args:
+            model: Trained model
+            target_images: Images to attack
+            sensitive_attribute_idx: Class index considered sensitive (default: 2 = iris)
+            
+        Returns:
+            Dictionary with inferred attributes
+        """
+        print(f"\n🔓 Starting Attribute Inference Attack...")
+        print(f"   Target attribute: Class {sensitive_attribute_idx} (Iris)")
+        
+        predictions = model.predict(target_images, verbose=0)
+        
+        # Extract sensitive attribute information
+        sensitive_ratios = []
+        sensitive_avg_confidences = []
+        
+        for pred in predictions:
+            # Calculate what percentage of pixels are classified as sensitive class
+            pred_classes = np.argmax(pred, axis=-1)
+            ratio = np.mean(pred_classes == sensitive_attribute_idx)
+            sensitive_ratios.append(ratio)
+            
+            # Average confidence for sensitive class
+            avg_conf = np.mean(pred[:, :, sensitive_attribute_idx])
+            sensitive_avg_confidences.append(avg_conf)
+        
+        sensitive_ratios = np.array(sensitive_ratios)
+        sensitive_avg_confidences = np.array(sensitive_avg_confidences)
+        
+        print(f"   Average iris region ratio: {np.mean(sensitive_ratios):.4f}")
+        print(f"   Average iris confidence: {np.mean(sensitive_avg_confidences):.4f}")
+        print(f"   ⚠️  Attacker can infer iris size/prominence from model outputs!")
+        
+        return {
+            'sensitive_ratios': sensitive_ratios,
+            'sensitive_confidences': sensitive_avg_confidences,
+            'mean_ratio': np.mean(sensitive_ratios),
+            'mean_confidence': np.mean(sensitive_avg_confidences)
+        }
+    
+    def model_extraction_attack(self, model, num_queries=1000, image_size=224):
+        """
+        Model Extraction Attack: Create a surrogate model by querying the target.
+        
+        This simulates an attacker trying to steal the model's functionality.
+        
+        Args:
+            model: Target model to extract
+            num_queries: Number of synthetic queries
+            image_size: Size of input images
+            
+        Returns:
+            Surrogate model and statistics
+        """
+        print(f"\n🔓 Starting Model Extraction Attack...")
+        print(f"   Generating {num_queries} synthetic queries...")
+        
+        # Generate synthetic queries
+        synthetic_images = np.random.uniform(0, 1, (num_queries, image_size, image_size, 1))
+        
+        # Query the target model
+        print("   Querying target model...")
+        stolen_labels = model.predict(synthetic_images, verbose=0)
+        stolen_labels = np.argmax(stolen_labels, axis=-1)
+        
+        # Train a simple surrogate model
+        print("   Training surrogate model...")
+        surrogate_model = tf.keras.Sequential([
+            tf.keras.layers.Input(shape=(image_size, image_size, 1)),
+            tf.keras.layers.Conv2D(32, 3, activation='relu', padding='same'),
+            tf.keras.layers.MaxPooling2D(2),
+            tf.keras.layers.Conv2D(64, 3, activation='relu', padding='same'),
+            tf.keras.layers.MaxPooling2D(2),
+            tf.keras.layers.Conv2D(128, 3, activation='relu', padding='same'),
+            tf.keras.layers.UpSampling2D(2),
+            tf.keras.layers.Conv2D(64, 3, activation='relu', padding='same'),
+            tf.keras.layers.UpSampling2D(2),
+            tf.keras.layers.Conv2D(self.num_classes, 1, activation='softmax')
+        ])
+        
+        surrogate_model.compile(
+            optimizer='adam',
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        # Train surrogate
+        history = surrogate_model.fit(
+            synthetic_images, stolen_labels,
+            epochs=10,
+            batch_size=32,
+            verbose=0
+        )
+        
+        final_accuracy = history.history['accuracy'][-1]
+        
+        print(f"   Surrogate model accuracy: {final_accuracy*100:.2f}%")
+        print(f"   ⚠️  Attacker successfully extracted model with {num_queries} queries!")
+        
+        return {
+            'surrogate_model': surrogate_model,
+            'training_accuracy': final_accuracy,
+            'num_queries': num_queries
+        }
+    
     def _calculate_ssim_manual(self, img1, img2):
         """Manual SSIM calculation if skimage is not available"""
         C1 = (0.01 * 1.0) ** 2
@@ -389,7 +568,7 @@ class ModelInversionAttack:
             
             # Gradient-based attack
             grad_recon, grad_loss = self.gradient_based_reconstruction(
-                sample_label, num_iterations=1000
+                sample_label, num_iterations=500
             )
             results['gradient_reconstructions'].append(grad_recon)
             
@@ -416,8 +595,8 @@ class ModelInversionAttack:
         if train_images is not None and train_labels is not None:
             print(f"\n{'='*80}")
             membership_results = self.membership_inference_attack(
-                self.model, train_images[:1000], train_labels[:1000],
-                test_images[:1000], test_labels[:1000]
+                self.model, train_images[:100], train_labels[:100],
+                test_images[:100], test_labels[:100]
             )
             results['membership_inference'] = membership_results
         

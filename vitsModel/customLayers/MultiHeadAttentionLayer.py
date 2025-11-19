@@ -24,9 +24,29 @@ class MultiHeadAttention(layers.Layer):
         self.dropout = layers.Dropout(dropout_rate)
 
     def attention(self, query, key, value, training=None):
+        # 1. Calculate standard score
         score = tf.matmul(query, key, transpose_b=True)
         dim_key = tf.cast(tf.shape(key)[-1], tf.float32)
         scaled_score = score / tf.math.sqrt(dim_key)
+
+        # === STEP 2 FIX: Auto-Detect Zeros ===
+        # Calculate the magnitude (sum of absolute values) of every patch in the Key
+        key_magnitude = tf.reduce_sum(tf.abs(key), axis=-1)  # Shape: (Batch, Heads, Patches)
+        
+        # Create a mask: 1.0 if data exists, 0.0 if it is a zero-vector
+        # We add a tiny epsilon (1e-6) to handle floating point errors
+        auto_mask = tf.cast(key_magnitude > 1e-6, tf.float32)
+        
+        # Reshape for broadcasting: (Batch, Heads, 1, Patches)
+        # This ensures the mask applies to all query positions
+        auto_mask = tf.expand_dims(auto_mask, axis=-2)
+
+        # Apply the penalty: If mask is 0, subtract 1 billion from the score.
+        # This forces Softmax to output 0.0 for these patches.
+        scaled_score += (1.0 - auto_mask) * -1e9
+        # =====================================
+
+        # 3. Standard Softmax
         weights = tf.nn.softmax(scaled_score, axis=-1)
         weights = self.dropout(weights, training=training)
         output = tf.matmul(weights, value)

@@ -33,15 +33,13 @@ class PrivacyAwareFeatureExtractor(layers.Layer):
         self.feature_norm = layers.LayerNormalization(epsilon=1e-6, name='privacy_norm')
         
     def call(self, x, training=None):
-        # Initial feature projection
         features = self.privacy_projection(x)
         
-        if training:
-            # Apply identity suppression during training
-            suppressed = self.identity_suppression(features)
-            # Blend original and suppressed features
-            features = (1 - self.anonymization_strength) * features + self.anonymization_strength * suppressed
+        # ✅ ALWAYS compute suppressed (ensures weights are always used)
+        suppressed = self.identity_suppression(features)
         
-        # Normalize features
-        features = self.feature_norm(features)
-        return features
+        # Control effect via anonymization_strength
+        features = (1.0 - self.anonymization_strength) * features + \
+                self.anonymization_strength * suppressed
+        
+        return self.feature_norm(features)
